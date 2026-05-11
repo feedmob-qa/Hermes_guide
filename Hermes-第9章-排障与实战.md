@@ -1,0 +1,1152 @@
+## 第九章 排障与实战
+
+> 本章定位：第三部分·精通 | 预估篇幅：~4000行 | 前置阅读：第1-7章
+
+**内容导读**
+
+```
+○ 9.1 六层诊断模型
+  - ○ 9.1.1 Layer 1-2：环境与安装
+  - ○ 9.1.2 Layer 3-4：进程与运行时
+  - ○ 9.1.3 Layer 5-6：配置与外部依赖
+  - ○ 9.1.4 分层诊断命令
+
+○ 9.2 常见场景排障
+  - ○ 9.2.1 消息不响应
+  - ○ 9.2.2 模型调用失败
+  - ○ 9.2.3 工具被拒绝
+  - ○ 9.2.4 上下文溢出
+  - ○ 9.2.5 WSL2 网络问题
+
+○ 9.3 日志分析
+  - ○ 9.3.1 实时跟踪
+  - ○ 9.3.2 事件过滤
+  - ○ 9.3.3 错误聚合
+
+○ 9.4 实战案例
+  - ○ 9.4.1 个人助手搭建
+  - ○ 9.4.2 团队协作机器人
+  - ○ 9.4.3 自动化报告生成
+  - ○ 9.4.4 代码审查助手
+  - ○ 9.4.5 知识库构建
+  - ○ 9.4.6 本地模型优化
+  - ○ 9.4.7 企业安全部署
+
+○ 9.5 插件开发
+  - ○ 9.5.1 插件架构
+  - ○ 9.5.2 内存提供者插件
+  - ○ 9.5.3 技能开发与发布
+  - ○ 9.5.4 代码贡献
+
+○ 9.6 本章小结
+```
+
+---
+
+### 9.1 六层诊断模型
+
+六层诊断模型是解决 Hermes 问题的结构化方法。它从底层（环境）到顶层（外部依赖）逐层升维，确保不跳过任何可能性。每层都有对应的诊断命令和典型症状。
+
+**诊断模型总览**
+
+```
+Layer 1: 环境 (Environment)     ─── 运行环境基础
+Layer 2: 安装 (Installation)    ─── 程序完整性
+Layer 3: 进程 (Process)         ─── 守护状态
+Layer 4: 运行时 (Runtime)       ─── 跑起来以后
+Layer 5: 配置 (Configuration)   ─── 设置正确性
+Layer 6: 外部依赖 (External)    ─── 第三方服务
+```
+
+#### 9.1.1 Layer 1-2：环境与安装
+
+**Layer 1：环境检查**
+
+确保操作系统满足最低要求。Hermes 官方支持的环境：
+
+| 环境 | 最低版本 | 备注 |
+|------|----------|------|
+| Python | >= 3.10 | 3.12/3.13 推荐 |
+| Linux | 内核 5.x+ | Ubuntu 22.04+ / Debian 12+ |
+| macOS | 12+ (Monterey) | Apple Silicon + Intel 均支持 |
+| WSL2 | Windows 10 2004+ | Ubuntu 22.04 推荐 |
+| Termux | Android 12+ | 通过 Termux 包管理器 |
+
+诊断命令：
+
+```bash
+# 快速环境诊断（一键检查全部）
+hermes doctor
+
+# 或手动检查关键项
+python3 --version           # 应 >= 3.10
+uname -a                    # 查看内核版本
+which hermes                # 确认 hermes 在 PATH 中
+```
+
+常见 Layer 1 问题及解决：
+
+| 问题 | 症状 | 解决方案 |
+|------|------|----------|
+| Python 版本过低 | `hermes doctor` 报版本错误 | `pyenv install 3.12` 或升级系统 Python |
+| 磁盘空间不足 | 安装失败或 SQLite 锁错误 | `df -h ~/.hermes` 检查，清理旧会话 |
+| 内存不足 | LLM 调用 OOM | 关闭其他程序，或使用轻量模型 |
+
+**Layer 2：安装检查**
+
+确认 Hermes 安装完整，核心文件未被损坏：
+
+```bash
+# 版本验证
+hermes version
+
+# 安装完整性检查
+hermes doctor
+
+# 确认核心文件存在
+ls ~/.hermes/config.yaml
+ls ~/.hermes/sessions/
+```
+
+安装相关文件路径：
+
+```
+~/.hermes/                      # Hermes 主目录（HERMES_HOME）
+├── config.yaml                 # 主配置
+├── .env                        # API 密钥和敏感配置
+├── sessions/                   # 会话记录 (SQLite + JSONL)
+├── logs/                       # 日志文件
+│   ├── agent.log               # 主代理日志
+│   ├── errors.log              # 错误日志（WARNING+）
+│   └── gateway.log             # 网关日志（仅 gateway 模式）
+├── skills/                     # 已安装技能
+├── profiles/                   # 配置文件
+└── auth.json                   # OAuth 令牌和凭证池
+```
+
+常见 Layer 2 问题：
+
+| 问题 | 诊断 | 解决 |
+|------|------|------|
+| 核心模块缺失 | ImportError | `pip install -e .` 重新安装 |
+| skills 目录损坏 | `hermes skills list` 为空 | `mkdir -p ~/.hermes/skills` 重建 |
+
+#### 9.1.2 Layer 3-4：进程与运行时
+
+**Layer 3：进程检查**
+
+确认 Hermes 进程在正确运行：
+
+```bash
+# CLI 模式：确认进程存在
+ps aux | grep hermes
+
+# 或使用内建命令
+hermes status
+
+# 网关模式：检查服务状态
+hermes gateway status
+
+# 端口检查（API Server / ACP）
+lsof -i :8080       # API Server 端口
+lsof -i :8081       # ACP 端口
+```
+
+**网关进程的生命周期**：
+
+```
+hermes gateway run         # 前台运行（调试）
+hermes gateway install     # 安装为 systemd 服务
+hermes gateway start       # 启动服务
+hermes gateway stop        # 停止服务
+hermes gateway restart     # 重启服务
+hermes gateway status      # 检查状态
+```
+
+网关日志实时查看：
+
+```bash
+tail -f ~/.hermes/logs/gateway.log
+```
+
+**Layer 4：运行时检查**
+
+进程在跑不代表功能正常。运行时问题是排障中最常见的：
+
+```bash
+# 运行时日志分析
+hermes logs --tail 100     # 最近 100 行
+hermes logs --level error  # 只看错误级别
+hermes logs --since "1h"   # 过去 1 小时
+
+# 网络连通性检查
+curl -I https://openrouter.ai/api/v1/models
+curl -I https://api.anthropic.com/v1/messages
+
+# 模型可用性检查
+hermes model list
+```
+
+**运行时需要重点监控的指标**：
+
+| 指标 | 正常范围 | 异常表现 |
+|------|----------|----------|
+| 每个 turn 的 iteration 次数 | 5-30 | > 50 可能工具死循环 |
+| LLM 响应延迟 | < 10s | > 30s 需检查网络或供应商 |
+| 上下文占用率 | < 70% | > 85% 即将触发压缩 |
+| 工具执行成功率 | > 95% | 频繁失败需检查工具配置 |
+
+#### 9.1.3 Layer 5-6：配置与外部依赖
+
+**Layer 5：配置检查**
+
+配置问题是 Hermes 新手最常见的问题根源：
+
+```bash
+# 配置验证
+hermes config --validate    # 或 hermes doctor
+hermes config check         # 检查缺失/过时配置
+hermes config               # 查看当前配置
+
+# 环境变量检查
+cat ~/.hermes/.env          # API 密钥（注意安全！）
+echo $OPENROUTER_API_KEY    # 确认环境变量已设置
+```
+
+配置优先级（从高到低）：
+
+```
+1. 命令行参数（--model, --provider 等）
+2. 环境变量（OPENROUTER_API_KEY 等）
+3. config.yaml 文件
+4. 内置默认值
+```
+
+**Layer 6：外部依赖检查**
+
+```bash
+# 供应商 API 状态
+hermes platform telegram --test   # Telegram 连接测试
+hermes platform discord --test    # Discord 连接测试
+hermes gateway --health           # 网关健康检查
+
+# DNS 解析测试
+nslookup openrouter.ai
+nslookup api.anthropic.com
+
+# MCP 服务器测试
+hermes mcp test <server-name>
+```
+
+#### 9.1.4 分层诊断命令
+
+`hermes doctor` 是最强大的诊断入口，支持分层执行：
+
+```bash
+# 完整诊断（所有层）
+hermes doctor
+
+# 分层执行
+hermes doctor --layer 1    # 环境
+hermes doctor --layer 2    # 安装
+hermes doctor --layer 3    # 进程
+hermes doctor --layer 4    # 运行时
+hermes doctor --layer 5    # 配置
+hermes doctor --layer 6    # 外部依赖
+
+# 自动修复模式（实验性）
+hermes doctor --fix
+```
+
+---
+
+### 9.2 常见场景排障
+
+#### 9.2.1 消息不响应
+
+**现象**：用户发送消息后，Hermes 完全没有回复。
+
+**分级排查步骤**：
+
+```
+Step 1: 确认平台连通性
+────────────────────────────
+hermes platform telegram --test
+hermes gateway status
+
+如果失败：
+├── 检查 Bot Token 是否有效
+├── 检查 Webhook URL 是否可达
+└── 检查平台 API 是否正常
+
+Step 2: 检查消息是否到达
+────────────────────────────
+hermes logs --filter "message.*received"
+hermes logs --filter "incoming"
+
+如果没看到日志：
+├── Webhook 配置可能错误
+├── 平台尚未推送消息
+└── 网络防火墙拦截
+
+Step 3: 检查网关处理日志
+────────────────────────────
+hermes logs --filter "conversation turn"
+hermes logs --level error
+
+Step 4: 检查审批队列
+────────────────────────────
+hermes approval list
+
+如果审批队列阻塞：
+├── 审批超时机制是否正常工作
+└── 检查审批心跳
+
+Step 5: 检查输出投递
+────────────────────────────
+grep "failed to send" ~/.hermes/logs/gateway.log
+```
+
+**典型根因分析**：
+
+| 根因 | 日志特征 | 修复 |
+|------|----------|------|
+| Webhook 未配置 | 无 incoming 日志 | `hermes gateway setup` 重新配置 |
+| Bot Token 失效 | `401 Unauthorized` | 重新获取并设置 | 
+| 网关未运行 | `Connection refused` | `hermes gateway start` |
+| 审批队列卡住 | `approval timeout` | 调整 `approval.timeout_seconds` |
+| 平台 API 限流 | `429 Too Many Requests` | 减少请求频率 |
+
+#### 9.2.2 模型调用失败
+
+**现象**：Hermes 开始处理但中途报模型相关错误。
+
+**分级排查步骤**：
+
+```
+Step 1: 验证 API Key
+────────────────────────────
+hermes config get model.provider
+echo $OPENROUTER_API_KEY
+# 或检查 .env 文件
+cat ~/.hermes/.env | grep API_KEY
+
+Step 2: 测试 API 连通性
+────────────────────────────
+# OpenRouter
+curl -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+     https://openrouter.ai/api/v1/models
+
+# Anthropic
+curl -H "x-api-key: $ANTHROPIC_API_KEY" \
+     -H "anthropic-version: 2023-06-01" \
+     https://api.anthropic.com/v1/messages
+
+Step 3: 检查模型配置
+────────────────────────────
+hermes model list
+hermes config get model.name
+
+Step 4: 检查错误日志
+────────────────────────────
+hermes logs --level error
+grep "APIError\|APIConnectionError" ~/.hermes/logs/agent.log | tail -10
+```
+
+**错误分类与处理**（源码参考：`agent/error_classifier.py`）：
+
+| 错误类型 | HTTP | FailoverReason | 自动恢复策略 |
+|----------|------|----------------|-------------|
+| 认证失败 | 401/403 | `auth` | 轮换凭证池 → 刷新令牌 |
+| 信用耗尽 | 402 | `billing` | 立即轮换凭证 |
+| 限流 | 429 | `rate_limit` | 首 次 重 试 同 凭 证 → 失 败 后 轮 换 |
+| 服务过载 | 503/529 | `overloaded` | 指数退避重试 |
+| 服务器错误 | 500/502 | `server_error` | 重试后回退模型 |
+| 上下文溢出 | - | `context_overflow` | 自动压缩后重试 |
+| 模型不可用 | 404 | `model_not_found` | 自动切回退模型 |
+| 图片过大 | 400 | `image_too_large` | 自动缩小图片重试 |
+| 超时 | - | `timeout` | 重建客户端后重试 |
+
+**凭证池轮换机制**（源码：`run_agent.py` `_recover_with_credential_pool()`）：
+
+当触发限流或信用耗尽时，凭证池按以下优先级切换：
+
+```python
+# 简化的恢复逻辑
+if reason == FailoverReason.billing or reason == FailoverReason.rate_limit:
+    next_credential = pool.mark_exhausted_and_rotate(status_code)
+    if next_credential:
+        self._swap_credential(next_credential)
+        # 自动重试当前请求
+        return True  # recovered
+```
+
+**配置凭证池**：
+
+```bash
+# 添加多个 API Key 到凭证池
+hermes auth add
+# 按提示输入 Provider 和 Key
+
+# 查看凭证池
+hermes auth list openrouter
+
+# 移除凭证
+hermes auth remove openrouter 1
+```
+
+#### 9.2.3 工具被拒绝
+
+**现象**：Hermes 提示需要审批或工具执行被阻止。
+
+**排查步骤**：
+
+```
+Step 1: 确认工具状态
+────────────────────────────
+hermes tools list
+
+Step 2: 检查审批队列
+────────────────────────────
+hermes approval list
+
+Step 3: 检查黑名单
+────────────────────────────
+hermes config get security.blacklist
+# 或直接查看
+cat ~/.hermes/config.yaml | grep -A 10 "blacklist"
+
+Step 4: 检查 YOLO 模式状态
+────────────────────────────
+hermes config get security.yolo_mode
+# 或在会话中输入 /yolo 查看状态
+```
+
+**审批控制模型**（源码：`run_agent.py` `_is_destructive_command()`）：
+
+```python
+# 危险命令检测模式
+_DESTRUCTIVE_PATTERNS = re.compile(
+    r"(?:^|\s|&&|\|\||;|`)(?:"
+    r"rm\s|rmdir\s|"
+    r"cp\s|install\s|"
+    r"mv\s|"
+    r"sed\s+-i|"
+    r"truncate\s|"
+    r"dd\s|"
+    r"shred\s|"
+    r"git\s+(?:reset|clean|checkout)\s"
+    r")",
+    re.VERBOSE,
+)
+```
+
+**审批模式配置**：
+
+```yaml
+# config.yaml
+approvals:
+  mode: manual          # manual | smart | off
+  # manual: 始终请求审批
+  # smart: 辅助 LLM 判断低风险命令（推荐）
+  # off: 完全跳过审批（慎重）
+```
+
+**临时解决方案**：
+
+```bash
+# 方法 1: 申请审批（推荐）
+/approve <approval_id>
+
+# 方法 2: YOLO 模式（当前会话）
+/yolo
+
+# 方法 3: 启动时跳过审批
+hermes --yolo chat -q "..."
+
+# 方法 4: 调整安全设置
+hermes config set approvals.mode smart
+```
+
+#### 9.2.4 上下文溢出
+
+**现象**：出现 `context overflow` 错误或 LLM 忘记较早对话内容。
+
+**排查步骤**：
+
+```
+Step 1: 查看上下文使用统计
+────────────────────────────
+hermes stats --context
+# 或在会话中
+/usage
+
+Step 2: 手动压缩
+────────────────────────────
+/compress
+
+Step 3: 调整压缩阈值
+────────────────────────────
+hermes config set model.context_compression_threshold 150000
+hermes config set model.max_context_tokens 200000
+
+Step 4: 切换大上下文模型
+────────────────────────────
+hermes model anthropic/claude-3-5-sonnet-20241022  # 200K
+hermes model openai/gpt-4o                          # 128K
+```
+
+**自动压缩原理**（源码：`agent/context_compressor.py`）：
+
+```python
+# 压缩触发条件
+if context_usage > THRESHOLD:  # 默认 max_context_tokens 的 70%
+    # 保护开头 + 末尾消息
+    head, middle, tail = split_messages(messages)
+    # 将中间内容发送到辅助 LLM 生成摘要
+    summary = _summarize(middle)
+    # 摘要格式：
+    # [CONTEXT COMPACTION — REFERENCE ONLY]
+    # ## 已完成的工作
+    # ## 活跃的任务
+    # ## 待解决的问题
+    # ## 重要决策
+    messages = head + [summary] + tail
+```
+
+**压缩策略参数**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `compression.threshold` | 0.50 | 上下文使用率达到 50% 时提示 |
+| `compression.target_ratio` | 0.20 | 压缩后保留原始上下文的 20% |
+| 首段保护 | 自动 | 系统提示、记忆、工具定义总是保留 |
+| 尾段保护 | 自动 | 最近 3-5 轮对话总是保留 |
+
+#### 9.2.5 WSL2 网络问题
+
+**现象**：WSL2 中无法连接本地模型或外网 API。
+
+**排查步骤**：
+
+```
+Step 1: 检查 WSL2 状态
+────────────────────────────
+wsl.exe -l -v
+
+Step 2: 测试 localhost 连通性
+────────────────────────────
+# 测试 Ollama（Windows 端）
+curl http://localhost:11434
+
+# 如果失败，尝试 Windows 主机 IP
+# 在 WSL2 中获取 Windows 主机 IP
+grep nameserver /etc/resolv.conf | awk '{print $2}'
+curl http://<windows-ip>:11434
+
+Step 3: 配置防火墙（Windows 管理员 PowerShell）
+────────────────────────────
+netsh advfirewall firewall add rule name="Hermes Ollama" ^
+  dir=in action=allow protocol=tcp localport=11434
+
+Step 4: 更新 Hermes 配置
+────────────────────────────
+# 获取 WSL2 IP
+hostname -I | awk '{print $1}'
+
+# 修改 config.yaml
+hermes config set providers.ollama.base_url http://<wsl2-ip>:11434
+```
+
+**WSL2 网络架构说明**：
+
+```
+Windows 主机 (10.0.0.x)
+    │
+    ├── WSL2 VM (172.x.x.x) ── localhost:11434 → Ollama
+    │        │
+    │        └── Hermes Agent ← 需要访问 Ollama
+    │
+    └── Windows 防火墙 ── 开放端口 11434
+```
+
+**常见 WSL2 网络问题对照表**：
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| `localhost` 不通 | WSL2 使用虚拟网卡 | 使用 Windows 主机 IP |
+| 无法访问外网 | VPN 干扰 | 关闭 VPN 或配置路由 |
+| Webhook 收不到 | Windows 防火墙 | 添加端口规则 |
+| 安装失败 | Windows 版本过低 | 升级到 Win 10 2004+ |
+| systemd 服务不启动 | WSL2 无 systemd | 配置 `/etc/wsl.conf` 启用 |
+
+---
+
+### 9.3 日志分析
+
+Hermes 的日志系统设计为三层分离，便于快速定位问题。核心源文件：`hermes_logging.py`。
+
+**日志架构**：
+
+```
+所有日志 → agent.log (RotatingFile, INFO+)
+         → errors.log (RotatingFile, WARNING+, 快速排查)
+         → gateway.log (仅 gateway 模块, INFO+)
+```
+
+#### 9.3.1 实时跟踪
+
+```bash
+# 实时跟踪主代理日志
+tail -f ~/.hermes/logs/agent.log
+
+# 实时跟踪错误日志
+tail -f ~/.hermes/logs/errors.log
+
+# 网关模式跟踪
+tail -f ~/.hermes/logs/gateway.log
+
+# 使用内建命令
+hermes logs --tail 50
+hermes logs --follow     # 等同 tail -f
+```
+
+**日志格式说明**：
+
+```
+2026-05-11 20:14:23 INFO [session_abc123] run_agent: conversation turn: session=abc123 model=claude-3.5-sonnet provider=openrouter platform=telegram history=12 msg="你好"
+```
+
+字段含义：
+
+| 字段 | 示例 | 说明 |
+|------|------|------|
+| 时间戳 | `2026-05-11 20:14:23` | 精确到秒 |
+| 级别 | `INFO` | DEBUG/INFO/WARNING/ERROR |
+| 会话 ID | `[session_abc123]` | 仅在有会话上下文时出现 |
+| 模块 | `run_agent` | 日志来源模块 |
+| 消息 | `conversation turn: ...` | 结构化日志内容 |
+
+#### 9.3.2 事件过滤
+
+```bash
+# 按级别过滤
+hermes logs --level error
+hermes logs --level warning
+
+# 按时间过滤
+hermes logs --since "2h"         # 过去 2 小时
+hermes logs --since "2026-05-10" # 从指定日期
+
+# 按关键词过滤（使用 grep）
+grep "APIError" ~/.hermes/logs/agent.log | tail -20
+grep "429\|rate limit" ~/.hermes/logs/agent.log
+grep "failed to send" ~/.hermes/logs/gateway.log
+
+# 按会话 ID 过滤
+grep "session_abc123" ~/.hermes/logs/agent.log
+
+# 排除噪声
+grep -v "httpx\|httpcore" ~/.hermes/logs/agent.log | tail -50
+```
+
+#### 9.3.3 错误聚合
+
+长时间运行的 Hermes 实例会产生大量日志，错误聚合帮助快速发现规律性问题：
+
+```bash
+# 统计错误类型分布
+grep "ERROR" ~/.hermes/logs/agent.log | \
+  sed 's/.*\] //' | \
+  awk '{print $1}' | \
+  sort | uniq -c | sort -rn
+
+# 按工具/函数聚合
+grep -oP 'tool_\w+' ~/.hermes/logs/agent.log | \
+  sort | uniq -c | sort -rn
+
+# 查看错误时间分布（按小时）
+grep "ERROR" ~/.hermes/logs/agent.log | \
+  grep -oP '^\d{4}-\d{2}-\d{2} \d{2}' | \
+  sort | uniq -c | sort -rn
+```
+
+**日志轮转配置**：
+
+日志文件使用 `RotatingFileHandler`，默认配置：
+
+| 文件 | 单个大小 | 保留数量 | 最大磁盘占用 |
+|------|----------|----------|-------------|
+| agent.log | 10 MB | 5 | 50 MB |
+| errors.log | 10 MB | 3 | 30 MB |
+| gateway.log | 10 MB | 5 | 50 MB |
+
+---
+
+### 9.4 实战案例
+
+#### 9.4.1 个人助手搭建
+
+**目标**：构建一个能够在 Telegram 上运行的日常助手。
+
+**步骤**：
+
+```
+1. 部署 Hermes
+   └── curl -fsSL https://get.hermes-agent.dev | bash
+
+2. 配置 Telegram Bot
+   ├── 在 @BotFather 创建 Bot，获取 Token
+   └── 写入 ~/.hermes/.env: TELEGRAM_BOT_TOKEN=xxx
+
+3. 配置模型
+   ├── export OPENROUTER_API_KEY=xxx
+   └── hermes model anthropic/claude-3-5-sonnet
+
+4. 启动网关
+   ├── hermes gateway install   # 安装为服务
+   └── hermes gateway start     # 启动
+
+5. 设置记忆
+   └── hermes memory setup
+
+6. 安装常用技能
+   ├── hermes skills install research/web-research
+   ├── hermes skills install productivity/google-workspace
+   └── hermes skills install note-taking/obsidian
+```
+
+**配置参考**：
+
+```yaml
+# config.yaml - 个人助手配置
+model:
+  provider: openrouter
+  name: anthropic/claude-3.5-sonnet
+
+memory:
+  enabled: true
+  provider: sqlite
+  fts_enabled: true
+
+skills:
+  enabled: true
+  auto_update: true
+
+security:
+  approval:
+    enabled: true
+    mode: smart  # 自动审批低风险命令
+```
+
+#### 9.4.2 团队协作机器人
+
+**目标**：在 Slack/Discord 上部署 Hermes，支持团队成员协作。
+
+**关键配置**：
+
+```yaml
+# config.yaml - 团队协作配置
+gateway:
+  platforms:
+    slack:
+      enabled: true
+      bot_token: ${SLACK_BOT_TOKEN}
+      signing_secret: ${SLACK_SIGNING_SECRET}
+      app_token: ${SLACK_APP_TOKEN}
+      
+    discord:
+      enabled: true
+      bot_token: ${DISCORD_BOT_TOKEN}
+      allowed_guild_ids:
+        - "123456789"
+
+access_control:
+  private_chat:
+    default_behavior: allow
+  group_chat:
+    default_behavior: require_mention
+    allowed_groups:
+      - "#engineering"
+      - "#general"
+```
+
+**安全建议**：
+
+- 启用审批队列，所有终端命令都需要确认
+- 限制群聊中的 `terminal` 工具
+- 设置 `allowed_chat_ids` 白名单
+- 定期轮换 Bot Token
+- 启用审计日志
+
+#### 9.4.3 自动化报告生成
+
+**目标**：每天早上 9 点自动抓取天气 + 新闻 + 待办事项，生成日报推送到 Telegram。
+
+**实现**：
+
+```bash
+# 创建定时任务
+hermes cron add "0 9 * * *" \
+  "Fetch today's weather, top 3 tech news headlines, and any calendar events. \
+   Generate a concise morning briefing report and send to my home channel."
+```
+
+**后台模式运行**：
+
+```bash
+# 复杂报告使用 /background
+/background "Analyze this week's GitHub commits across the team repos \
+  and generate a weekly summary report"
+```
+
+#### 9.4.4 代码审查助手
+
+**目标**：自动审查 GitHub Pull Request。
+
+**技能安装**：
+
+```bash
+hermes skills install development/github-code-review
+hermes skills install development/code-quality-benchmark
+hermes skills install development/requesting-code-review
+```
+
+**使用示例**：
+
+```bash
+# 审查指定 PR
+hermes chat -q \
+  "Review PR #42 in org/repo — analyze diff, security issues, test coverage"
+
+# 或使用 cron 自动审查新 PR
+hermes cron add "0 * * * *" \
+  "Check for new open PRs in org/repo that haven't been reviewed yet. \
+   Review any unreviewed PRs and post results as PR comments."
+```
+
+#### 9.4.5 知识库构建
+
+**目标**：使用 LMWiki 构建个人知识库，并关联 Obsidian。
+
+**步骤**：
+
+```yaml
+# config.yaml - 知识库配置
+memory:
+  lmwiki:
+    enabled: true
+    wiki_path: ~/.hermes/wiki
+    obsidian:
+      enabled: true
+      vault_path: ~/wiki
+      sync_enabled: true
+```
+
+```bash
+# 导入知识
+/wiki ingest "https://docs.python.org/3/tutorial/index.html"
+
+# 查询知识
+/wiki query "Python decorator usage"
+
+# 查看知识库状态
+/wiki status
+```
+
+**LMWiki 三层架构**：
+
+```
+wiki_path/
+├── raw/          # 原始文档（ingest 输入）
+├── wiki/         # 整理后的知识（lint 后可搜索）
+└── SCHEMA.md     # 知识库结构定义
+```
+
+#### 9.4.6 本地模型优化
+
+**目标**：使用本地 Ollama 模型降低成本，同时保证工具调用质量。
+
+**配置**：
+
+```yaml
+# config.yaml - 本地模型配置
+model:
+  provider: ollama
+  name: llama3.1:70b  # 或 qwen2.5:32b, deepseek-r1:70b
+
+providers:
+  ollama:
+    base_url: http://localhost:11434
+    keep_alive: 5m
+
+agent:
+  max_turns: 90
+  tool_use_enforcement: true
+```
+
+**Ollama 配置要点**：
+
+```bash
+# 确保工具调用能力开启
+ollama pull llama3.1:70b
+
+# 确认支持工具调用
+curl http://localhost:11434/api/tags
+
+# 设置 num_ctx 匹配模型能力
+ollama run llama3.1:70b -- --num-ctx 32768
+```
+
+**本地模型工具调用配置**：
+
+```yaml
+# 本地模型需要 --jinja 和 --tool-call-parser
+providers:
+  ollama:
+    base_url: http://localhost:11434
+    chat_template: jinja   # 或 use `--jinja` flag
+    tool_call_parser: python  # 或 `--tool-call-parser python`
+```
+
+#### 9.4.7 企业安全部署
+
+**目标**：在生产环境中安全部署 Hermes。
+
+**安全配置**：
+
+```yaml
+# config.yaml - 企业安全配置
+security:
+  approval:
+    enabled: true
+    yolo_mode: false
+    heartbeat_interval: 30  # 审批心跳间隔（秒）
+  
+  sandbox:
+    enabled: true
+    type: docker
+    image: hermes-agent/sandbox:latest
+    network: false
+    privileged: false
+  
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+    burst: 10
+
+access_control:
+  device_approval: true
+  approved_devices: []
+  private_chat:
+    default_behavior: allow
+  group_chat:
+    default_behavior: require_mention
+```
+
+**生产环境部署检查清单**：
+
+```
+□ API Key 仅通过环境变量注入，不硬编码
+□ 启用命令审批（approval.enabled: true）
+□ 启用 Docker 沙箱隔离
+□ 配置速率限制
+□ 启用设备批准
+□ 设置白名单/黑名单
+□ 配置日志轮转
+□ 启用跨平台会话同步
+□ 定期备份 ~/.hermes 目录
+□ 限制 API Server 监听 127.0.0.1
+□ 启用 MCP 服务器认证
+□ 配置凭证池冗余
+```
+
+**凭证轮换策略**：
+
+```yaml
+# 配置多个 OpenRouter API Key 实现自动轮换
+providers:
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}  # 默认
+    # 通过 hermes auth add 添加额外凭证
+```
+
+---
+
+### 9.5 插件开发
+
+#### 9.5.1 插件架构
+
+Hermes 的插件系统允许开发者在多个生命周期点注入自定义逻辑。
+
+**插件生命周期钩子**：
+
+| 钩子 | 触发时机 | 参数 |
+|------|----------|------|
+| `on_session_start` | 新会话创建 | `session_id`, `model`, `platform` |
+| `on_tool_complete` | 工具执行完成 | `tool_name`, `result` |
+| `on_message_send` | 消息投递前 | `message`, `platform` |
+
+**插件注册方式**：
+
+```python
+# plugins/my_plugin.py
+from hermes_cli.plugins import register_hook
+
+@register_hook("on_session_start")
+def log_new_session(session_id, model, platform):
+    print(f"New session: {session_id} on {platform} using {model}")
+
+@register_hook("on_tool_complete")
+def track_tool_execution(tool_name, result):
+    print(f"Tool {tool_name} executed: {len(result)} bytes")
+```
+
+#### 9.5.2 内存提供者插件
+
+Hermes 支持可插拔的记忆后端。当前内置的提供者：
+
+| 提供者 | 类型 | 特点 |
+|--------|------|------|
+| SQLite | 内置 | 默认，零配置 |
+| Honcho | 插件 | 结构化记忆，标签系统 |
+| Supermemory | 外部 API | 云记忆同步 |
+| Mem0 | 外部 API | 企业级记忆管理 |
+
+**开发自定义记忆提供者**：
+
+```python
+# plugins/memory_provider.py
+from hermes_cli.plugins import MemoryProvider
+
+class MyMemoryProvider(MemoryProvider):
+    def initialize(self):
+        # 初始化数据库连接
+        pass
+    
+    def save(self, key: str, value: str):
+        # 存储记忆条目
+        pass
+    
+    def search(self, query: str):
+        # 搜索记忆
+        pass
+    
+    def format_for_system_prompt(self, target: str) -> str:
+        # 生成系统提示中的记忆块
+        return "## Memory\n..."
+```
+
+#### 9.5.3 技能开发与发布
+
+技能（Skill）是 Hermes 最具特色的扩展方式。详见第 5 章的技能开发指南。
+
+**技能生命周期**：
+
+```
+开发 → 本地测试 → 发布到 Hub → 社区使用
+  │                         
+  ├── SKILL.md 编写
+  ├── 本地安装测试: cp -r ~/my-skill ~/.hermes/skills/
+  └── 技能升级: hermes skills publish PATH
+```
+
+**技能规范**（SKILL.md 格式）：
+
+```yaml
+---
+name: my-skill
+description: "My custom skill"
+version: 1.0.0
+author: My Name
+tags: [custom, automation]
+---
+
+# My Skill
+
+...markdown body...
+```
+
+#### 9.5.4 代码贡献
+
+Hermes 的源码贡献流程：
+
+**项目结构**（关键路径）：
+
+```
+hermes-agent/
+├── run_agent.py              # AIAgent 核心 Loop
+├── model_tools.py            # 工具发现与调度
+├── toolsets.py               # 工具集定义
+├── cli.py                    # CLI 交互入口
+├── hermes_state.py           # SQLite 会话存储
+├── agent/                    # 系统提示、压缩、记忆、路由
+│   ├── prompt_builder.py     # 系统提示装配
+│   ├── context_compressor.py # 上下文压缩
+│   ├── memory_manager.py     # 记忆管理
+│   ├── error_classifier.py   # 错误分类
+│   └── auxiliary_client.py   # 辅助 LLM 调用
+├── hermes_cli/               # CLI 子命令
+│   ├── commands.py           # 斜杠命令注册
+│   ├── config.py             # 配置管理
+│   └── main.py               # CLI 入口
+├── tools/                    # 内置工具
+│   ├── registry.py           # 工具注册中心
+│   ├── terminal_tool.py      # 终端执行
+│   ├── browser_tool.py       # 浏览器自动化
+│   ├── web_search_tool.py    # 网页搜索
+│   └── ...
+└── gateway/                  # 消息网关
+    ├── run.py                # 网关主循环
+    └── platforms/            # 平台适配器
+```
+
+**贡献流程**：
+
+```bash
+# 1. Fork 仓库
+# 2. Clone 并创建分支
+git clone https://github.com/YOUR_USERNAME/hermes-agent
+git checkout -b feat/my-feature
+
+# 3. 开发
+# 4. 运行测试
+python -m pytest tests/ -o 'addopts=' -q
+
+# 5. 提交 PR
+git commit -m "feat: my feature description"
+git push origin feat/my-feature
+# 打开 GitHub Pull Request
+```
+
+**提交规范**：
+
+```
+type: concise subject line
+
+Optional body.
+
+Types: fix:, feat:, refactor:, docs:, chore:
+```
+
+---
+
+### 9.6 本章小结
+
+本章是全书最实用的一章，覆盖了从排障方法论到真实部署的全流程。
+
+**六层诊断模型**：从环境（Layer 1）到外部依赖（Layer 6），每一层都有对应的诊断命令和典型问题。`hermes doctor` 是核心诊断入口。
+
+**常见排障场景**：消息不响应、模型调用失败、工具被拒绝、上下文溢出、WSL2 网络问题——每种场景都有分步排查流程。
+
+**日志分析**：三层日志架构（agent.log / errors.log / gateway.log）配合 `hermes logs` 命令和 grep 工具，可以快速定位问题根因。
+
+**凭证恢复机制**：凭证池自动轮换、模型智能回退、上下文压缩——Hermes 内置的容错体系能自动处理大部分运行时问题。
+
+**七个实战案例**：从个人助手到企业安全部署，覆盖了 Hermes 的典型使用场景。
+
+**插件与贡献**：插件系统提供事件钩子拓展，技能系统提供零代码扩展，源码贡献路径清晰。
+
+---
+
+**延伸阅读：** 附录 D《排障速查》提供六层诊断模型速查、错误代码表和冷却梯度策略。附录 G《最佳实践》涵盖安全、性能、成本和可靠性建议。
